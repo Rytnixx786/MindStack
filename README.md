@@ -18,9 +18,15 @@ MindStack turns scattered internal documents into a grounded answer system. It c
 
 Most RAG demos fail in the same ways: weak retrieval, no citations, no observability, and confident answers that are wrong. MindStack solves that with evidence-only responses, explicit refusals when context is missing, and an evaluation loop that checks quality before promotion. That makes it useful for support, onboarding, policy lookup, and knowledge-base search.
 
-## Portfolio Pitch
+## What actually Matters
 
-MindStack is a full-stack, production-oriented RAG system focused on one question: "Can this answer be trusted?" Instead of optimizing only for fluent output, the project prioritizes grounded retrieval, explicit refusal, measurable quality gates, and operational visibility. It demonstrates system design, backend engineering, frontend product thinking, and practical AI reliability patterns in one cohesive implementation.
+MindStack is a full-stack, production-oriented RAG system focused on one question: "Can this answer be trusted?" Instead of optimizing only for fluent output, the project prioritizes grounded retrieval, explicit refusal, measurable quality gates, and operational visibility.
+
+- **Problem**: Typical RAG demos hallucinate, hide uncertainty, and lack measurable quality controls.
+- **Solution**: Hybrid retrieval + reranking + refusal gating + citations + evaluation quality gates.
+- **Business impact**: Higher trust in answers for support, onboarding, and policy lookup workflows.
+- **Engineering scope**: Backend API design, retrieval quality, evaluation automation, observability, and frontend UX.
+- **Role fit**: AI Engineer, Applied ML Engineer, Backend Engineer (Python/FastAPI), Full-Stack Engineer.
 
 ## Architecture At A Glance
 
@@ -70,7 +76,7 @@ flowchart TD
 - **Production mindset is visible**: CI badges, deployment scripts, health checks, and metrics are part of the core repo story.
 - **Tradeoffs are documented**: The README states what is production-ready and what still needs scaling work.
 
-## Architecture
+## Request Lifecycle
 
 ```mermaid
 flowchart TD
@@ -111,6 +117,25 @@ flowchart TD
 | Frontend | React + Vite + Tailwind CSS | Responsive, modern, portfolio-ready UI |
 | Evaluation | Dataset-driven evaluator + quality gate | Enforces per-category pass rates and refusal-accuracy threshold |
 | Observability | JSONL logs + `/metrics` | Query-level tracing and runtime visibility |
+
+## ATS Keywords
+
+- Python
+- FastAPI
+- Pydantic
+- RAG (Retrieval-Augmented Generation)
+- LLM Evaluation
+- Hybrid Retrieval (Vector + BM25)
+- Cross-Encoder Reranking
+- Ollama
+- Docker / Docker Compose
+- REST API Design
+- Automated Testing (Pytest)
+- CI/CD (GitHub Actions)
+- Observability and Metrics
+- Caching and Performance Optimization
+- SQLite
+- React + Vite
 
 ## Core Features
 
@@ -434,6 +459,13 @@ Refusal threshold is environment-configurable via `EVAL_REFUSAL_ACCURACY_THRESHO
 
 This tradeoff is intentional: refusal behavior was improved significantly without aggressive tuning, while grounded quality remains high.
 
+### Resume-Ready Impact Bullets
+
+- Built a production-oriented RAG platform with hybrid retrieval, reranking, refusal controls, and citation-based grounding.
+- Improved refusal accuracy from **26.67%** to **66.67%** while maintaining high grounded pass rate (**95%**) and increasing overall pass rate to **84%**.
+- Implemented evaluation-driven quality gates and CI workflows to catch regressions before deployment.
+- Added observability with runtime metrics and trend reporting for latency and grounding performance.
+
 ## How to Run Locally
 
 ### Option 1: Docker demo
@@ -482,43 +514,6 @@ curl -X POST http://localhost:8000/ingest
 cd h:\Projects\RAG_App_01\rag-system
 .\run-eval.ps1
 ```
-
-## Deploy Live Demo
-
-### Quick Deploy with Railway.app
-
-Deploy a live demo in ~5 minutes:
-
-```bash
-# 1. Install Railway CLI: https://railway.app/cli
-# 2. Login and link project
-railway login
-railway link
-
-# 3. Deploy
-railway up
-```
-
-Railway will automatically detect Docker Compose and deploy Ollama + backend + Chroma. Share the Railway URL with interviewers.
-
-### Alternative: Render.com
-
-1. Push code to GitHub
-2. Connect Render.com to your repo: https://render.com/dashboard
-3. Create a new Web Service, select Docker
-4. Set environment variables (e.g., `OLLAMA_MODEL=mistral`)
-5. Deploy
-
-### Local Port Forwarding (Quick Demo Alternative)
-
-Use ngrok to expose localhost publicly without deployment:
-
-```bash
-ngrok http 5173  # Frontend
-ngrok http 8000  # API
-```
-
-Share the ngrok URLs with portfolio reviewers. Dead simple for quick demos.
 
 ## Data and Runtime Artifacts
 
