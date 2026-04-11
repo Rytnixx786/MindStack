@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import os
 import pickle
 import re
@@ -11,7 +12,7 @@ import time
 import threading
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, AsyncGenerator, Dict, List, Optional, cast
 
 try:
     from .config import settings
@@ -584,6 +585,304 @@ def generate_answer(query: str, chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
         "prompt_version": prompt_version,
         "llm_called": llm_called,
     }
+
+
+async def run_rag_query_stream(request: QueryRequest) -> AsyncGenerator[str, None]:
+    """Run retrieval pipeline and stream NDJSON events for progressive rendering."""
+    start = time.perf_counter()
+
+    query = request.query
+    top_k_retrieval = request.top_k_retrieval
+    top_k_rerank = request.top_k_rerank
+    cache_key = _build_cache_key(request)
+
+    cached_response = _get_cached_response(cache_key)
+    if cached_response is not None:
+        latency_ms = (time.perf_counter() - start) * 1000
+        cached_response.latency_ms = latency_ms
+        cached_response.cached = True
+        cached_response.llm_called = False
+
+        cached_citations = [
+            {
+                "source": citation.source,
+                "chunk_index": citation.chunk_index,
+                "text": citation.text,
+                "reranker_score": citation.reranker_score,
+                "retrieval_method": citation.retrieval_method,
+            }
+            for citation in cached_response.citations
+        ]
+        citations_payload = {
+            "event": "citations",
+            "data": {
+                "citations": cached_citations,
+                "chunks_retrieved": int(cached_response.chunks_retrieved),
+                "answer_grounded": bool(cached_response.answer_grounded),
+                "reranker_applied": bool(cached_response.reranker_applied),
+                "prompt_version": str(cached_response.prompt_version),
+            },
+        }
+        yield json.dumps(citations_payload) + "\n"
+
+        if cached_response.answer:
+            yield json.dumps({"event": "token", "data": {"token": cached_response.answer}}) + "\n"
+
+        done_payload = {
+            "event": "done",
+            "data": {
+                "answer": cached_response.answer,
+                "answer_grounded": bool(cached_response.answer_grounded),
+                "latency_ms": latency_ms,
+                "cached": True,
+                "model_used": str(cached_response.model_used),
+                "llm_called": False,
+                "chunks_retrieved": int(cached_response.chunks_retrieved),
+                "prompt_version": str(cached_response.prompt_version),
+                "reranker_applied": bool(cached_response.reranker_applied),
+                "citations": cached_citations,
+            },
+        }
+        yield json.dumps(done_payload) + "\n"
+        return
+
+    chunks = hybrid_retrieval(query=query, top_k_each=top_k_retrieval)
+    reranked_chunks = _RERANKER.rerank(query=query, chunks=chunks, top_k=top_k_rerank)
+
+    prompt_config = load_prompt_config()
+    prompt_version = str(prompt_config.get("version", "1.1")).strip() or "1.1"
+    refusal_token = str(prompt_config.get("refusal_token", "INSUFFICIENT_CONTEXT"))
+
+    if not reranked_chunks:
+        latency_ms = (time.perf_counter() - start) * 1000
+        response = RAGResponse(
+            query=query,
+            answer=refusal_token,
+            answer_grounded=False,
+            citations=[],
+            chunks_retrieved=0,
+            latency_ms=latency_ms,
+            model_used="relevance-gate",
+            prompt_version=prompt_version,
+            reranker_applied=True,
+            llm_called=False,
+            cached=False,
+        )
+        _cache_response(cache_key, response)
+
+        done_payload = {
+            "event": "done",
+            "data": {
+                "answer": refusal_token,
+                "answer_grounded": False,
+                "latency_ms": latency_ms,
+                "cached": False,
+                "model_used": "relevance-gate",
+                "llm_called": False,
+                "chunks_retrieved": 0,
+                "prompt_version": prompt_version,
+                "reranker_applied": True,
+                "citations": [],
+            },
+        }
+        yield json.dumps(done_payload) + "\n"
+        return
+
+    citations = [
+        {
+            "source": str(chunk.get("source", "unknown")),
+            "chunk_index": int(chunk.get("chunk_index", 0)),
+            "text": str(chunk.get("text", "")),
+            "reranker_score": float(chunk.get("reranker_score", 0.0)),
+            "retrieval_method": str(chunk.get("retrieval_method", "hybrid")),
+        }
+        for chunk in reranked_chunks
+    ]
+
+    citations_payload = {
+        "event": "citations",
+        "data": {
+            "citations": citations,
+            "chunks_retrieved": len(reranked_chunks),
+            "answer_grounded": True,
+            "reranker_applied": True,
+            "prompt_version": prompt_version,
+        },
+    }
+    yield json.dumps(citations_payload) + "\n"
+
+    citation_objects = [
+        ChunkResult(
+            text=str(chunk.get("text", "")),
+            source=str(chunk.get("source", "unknown")),
+            chunk_index=int(chunk.get("chunk_index", 0)),
+            reranker_score=float(chunk.get("reranker_score", 0.0)),
+            retrieval_method=str(chunk.get("retrieval_method", "hybrid")),
+        )
+        for chunk in reranked_chunks
+    ]
+
+    if _ENABLE_EXTRACTIVE_FAST_PATH:
+        fast_answer = _extractive_fast_answer(query, reranked_chunks)
+        if fast_answer:
+            yield json.dumps({"event": "token", "data": {"token": fast_answer}}) + "\n"
+
+            latency_ms = (time.perf_counter() - start) * 1000
+            response = RAGResponse(
+                query=query,
+                answer=fast_answer,
+                answer_grounded=True,
+                citations=citation_objects,
+                chunks_retrieved=len(reranked_chunks),
+                latency_ms=latency_ms,
+                model_used="extractive-fast-path",
+                prompt_version=prompt_version,
+                reranker_applied=True,
+                llm_called=False,
+                cached=False,
+            )
+            _cache_response(cache_key, response)
+
+            done_payload = {
+                "event": "done",
+                "data": {
+                    "answer": fast_answer,
+                    "answer_grounded": True,
+                    "latency_ms": latency_ms,
+                    "cached": False,
+                    "model_used": "extractive-fast-path",
+                    "llm_called": False,
+                    "chunks_retrieved": len(reranked_chunks),
+                    "prompt_version": prompt_version,
+                    "reranker_applied": True,
+                    "citations": citations,
+                },
+            }
+            yield json.dumps(done_payload) + "\n"
+            return
+
+    context_sections: List[str] = []
+    for i, chunk in enumerate(reranked_chunks, start=1):
+        context_sections.append(
+            f"[Chunk {i}] Source: {chunk.get('source', 'unknown')}, Index: {chunk.get('chunk_index', 0)}\n"
+            f"{_trim_chunk_text(str(chunk.get('text', '')))}"
+        )
+
+    context_text = "\n\n".join(context_sections) if context_sections else "No context chunks retrieved."
+    user_message = (
+        f"Question:\n{query}\n\n"
+        f"Context Chunks:\n{context_text}\n\n"
+        "Use only these chunks. Refuse only if evidence is clearly insufficient or unrelated."
+    )
+
+    full_answer_text = ""
+    try:
+        ollama_module = importlib.import_module("ollama")
+        ollama_host = os.getenv(
+            "OLLAMA_BASE_URL",
+            str(getattr(settings, "ollama_host", "http://localhost:11434")),
+        )
+        client = ollama_module.Client(host=ollama_host)
+        stream_iter = client.chat(
+            model=_OLLAMA_MODEL,
+            messages=[
+                {"role": "system", "content": str(prompt_config.get("system_prompt", "")).strip()},
+                {"role": "user", "content": user_message},
+            ],
+            options={
+                "num_predict": _OLLAMA_NUM_PREDICT,
+                "num_ctx": _OLLAMA_NUM_CTX,
+                "temperature": 0.0,
+            },
+            keep_alive=_OLLAMA_KEEP_ALIVE,
+            stream=True,
+        )
+
+        for chunk in stream_iter:
+            token = ""
+            if isinstance(chunk, dict):
+                token = str(chunk.get("message", {}).get("content", "") or chunk.get("response", ""))
+            else:
+                token = str(chunk)
+
+            if not token:
+                continue
+
+            full_answer_text += token
+
+            token_payload = {"event": "token", "data": {"token": token}}
+            yield json.dumps(token_payload) + "\n"
+
+        latency_ms = (time.perf_counter() - start) * 1000
+        final_answer = full_answer_text.strip() or refusal_token
+        final_grounded = final_answer != refusal_token
+        done_payload = {
+            "event": "done",
+            "data": {
+                "answer": final_answer,
+                "answer_grounded": final_grounded,
+                "latency_ms": latency_ms,
+                "cached": False,
+                "model_used": "mistral",
+                "llm_called": True,
+                "chunks_retrieved": len(reranked_chunks),
+                "prompt_version": prompt_version,
+                "reranker_applied": True,
+                "citations": citations,
+            },
+        }
+
+        response = RAGResponse(
+            query=query,
+            answer=final_answer,
+            answer_grounded=final_grounded,
+            citations=citation_objects if final_grounded else [],
+            chunks_retrieved=len(reranked_chunks),
+            latency_ms=latency_ms,
+            model_used="mistral",
+            prompt_version=prompt_version,
+            reranker_applied=True,
+            llm_called=True,
+            cached=False,
+        )
+        _cache_response(cache_key, response)
+
+        yield json.dumps(done_payload) + "\n"
+    except Exception as exc:  # pylint: disable=broad-except
+        print(f"Ollama streaming failed: {exc}")
+        latency_ms = (time.perf_counter() - start) * 1000
+
+        response = RAGResponse(
+            query=query,
+            answer=refusal_token,
+            answer_grounded=False,
+            citations=[],
+            chunks_retrieved=len(reranked_chunks),
+            latency_ms=latency_ms,
+            model_used="mistral",
+            prompt_version=prompt_version,
+            reranker_applied=True,
+            llm_called=False,
+            cached=False,
+        )
+        _cache_response(cache_key, response)
+
+        done_payload = {
+            "event": "done",
+            "data": {
+                "answer": refusal_token,
+                "answer_grounded": False,
+                "latency_ms": latency_ms,
+                "cached": False,
+                "model_used": "mistral",
+                "llm_called": False,
+                "chunks_retrieved": len(reranked_chunks),
+                "prompt_version": prompt_version,
+                "reranker_applied": True,
+                "citations": citations,
+            },
+        }
+        yield json.dumps(done_payload) + "\n"
 
 
 def run_rag_query(request: QueryRequest) -> RAGResponse:

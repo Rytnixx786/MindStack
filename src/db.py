@@ -97,6 +97,19 @@ def _percentile(sorted_values: List[float], ratio: float) -> float:
     return float(sorted_values[index])
 
 
+def _latency_bucket_stats(values: List[float]) -> Dict[str, float | int]:
+    """Compute latency summary stats for one response-type bucket."""
+    sorted_values = sorted(values)
+    count = len(sorted_values)
+    avg_ms = float(sum(sorted_values) / count) if count else 0.0
+    return {
+        "count": count,
+        "avg_ms": avg_ms,
+        "p50_ms": _percentile(sorted_values, 0.50),
+        "p95_ms": _percentile(sorted_values, 0.95),
+    }
+
+
 def get_metrics_summary() -> Dict[str, Any]:
     """Return aggregate metrics from SQLite query_log."""
     with closing(_get_connection()) as conn:
@@ -112,6 +125,30 @@ def get_metrics_summary() -> Dict[str, Any]:
 
         latencies_rows = conn.execute("SELECT latency_ms FROM query_log ORDER BY latency_ms ASC").fetchall()
         latencies = [float(row["latency_ms"]) for row in latencies_rows]
+
+        bucket_rows = conn.execute(
+            """
+            SELECT latency_ms, cached, llm_called
+            FROM query_log
+            """
+        ).fetchall()
+
+        bucket_latencies: Dict[str, List[float]] = {
+            "cached": [],
+            "extractive_fast_path": [],
+            "full_generation": [],
+        }
+        for row in bucket_rows:
+            latency_value = float(row["latency_ms"])
+            cached = int(row["cached"]) == 1
+            llm_called = int(row["llm_called"]) == 1
+
+            if cached:
+                bucket_latencies["cached"].append(latency_value)
+            elif not llm_called:
+                bucket_latencies["extractive_fast_path"].append(latency_value)
+            else:
+                bucket_latencies["full_generation"].append(latency_value)
 
         queries_last_24h_row = conn.execute(
             """
@@ -133,6 +170,22 @@ def get_metrics_summary() -> Dict[str, Any]:
     grounded_rate = float(totals["grounded_rate"]) if totals else 0.0
     avg_latency_ms = float(totals["avg_latency_ms"]) if totals else 0.0
 
+    latency_breakdown = {
+        "cached": _latency_bucket_stats(bucket_latencies["cached"]),
+        "extractive_fast_path": _latency_bucket_stats(bucket_latencies["extractive_fast_path"]),
+        "full_generation": _latency_bucket_stats(bucket_latencies["full_generation"]),
+    }
+
+    full_generation_stats = latency_breakdown["full_generation"]
+    if int(full_generation_stats["count"]) == 0:
+        latency_note = "No full generation queries logged yet."
+    else:
+        latency_note = (
+            "p50 reflects cache+fast-path queries. "
+            f"Full generation p50: {float(full_generation_stats['p50_ms']):.1f}ms, "
+            f"p95: {float(full_generation_stats['p95_ms']):.1f}ms."
+        )
+
     return {
         "total_queries": total_queries,
         "grounded_rate": grounded_rate,
@@ -141,6 +194,8 @@ def get_metrics_summary() -> Dict[str, Any]:
         "p50_latency_ms": _percentile(latencies, 0.50),
         "queries_last_24h": int(queries_last_24h_row["total"]) if queries_last_24h_row else 0,
         "grounded_rate_7d": float(grounded_rate_7d_row["grounded_rate_7d"]) if grounded_rate_7d_row else 0.0,
+        "latency_breakdown": latency_breakdown,
+        "latency_note": latency_note,
     }
 
 

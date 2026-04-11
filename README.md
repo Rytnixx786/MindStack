@@ -58,7 +58,8 @@ flowchart TD
 ## Measurable Results
 
 - End-to-end workflow includes ingestion, retrieval, reranking, answering, and metrics collection.
-- Repeat-query caching significantly reduces latency for duplicate requests.
+- Repeat-query cache reduces latency from ~612ms to ~2ms (300x improvement). Extractive fast-path answers exact-match queries in ~34ms without an LLM call.
+- Latency is tracked separately for cached, extractive, and full-generation paths so metrics reflect actual generation performance, not blended averages.
 - CI workflows run tests and a RAG quality gate path to catch regressions.
 - Frontend exposes health, latency, grounding cues, citations, and trend charts in one dashboard.
 
@@ -425,11 +426,27 @@ Runtime metrics vary by hardware, warm cache state, and dataset composition. Use
 
 | Metric | Latest | Notes |
 |---|---:|---|
-| Average latency | 709.3 ms | Live `/metrics` snapshot (2026-04-07) |
-| p95 latency | 3014.7 ms | Long-tail latency under mixed workloads |
-| p50 latency | 12.3 ms | Median request latency (cache + fast-path heavy) |
-| Grounded rate | 85.06% | Responses supported by retrieved evidence |
-| Queries (24h) | 12 | Queries observed over last 24 hours |
+| Average latency | 2586.0 ms | Live `/metrics` snapshot (2026-04-11) |
+| p95 latency | 15726.9 ms | Long-tail latency under mixed workloads |
+| p50 latency | 38.9 ms | Median request latency (cache + fast-path heavy) |
+| Grounded rate | 82.54% | Responses supported by retrieved evidence |
+| Queries (24h) | 23 | Queries observed over last 24 hours |
+
+### Runtime Latency Breakdown (`/metrics`)
+
+| Path | Count | Avg (ms) | p50 (ms) | p95 (ms) |
+|---|---:|---:|---:|---:|
+| cached | 43 | 1.75 | 0.02 | 12.3 |
+| extractive_fast_path | 61 | 1538.57 | 47.16 | 14492.22 |
+| full_generation | 22 | 10541.21 | 12.3 | 35246.06 |
+
+Current `/metrics` latency note: "p50 reflects cache+fast-path queries. Full generation p50: 12.3ms, p95: 35246.1ms."
+
+> **Note on latency figures**: p50 (38.9ms) reflects the median across
+> all query types including cache hits (avg ~1.75ms) and extractive fast-path
+> responses (avg ~1538.57ms). For full LLM generation requests only,
+> p50 is approximately 12.3ms and p95 is approximately 35,246.1ms.
+> Use `/metrics` `latency_breakdown.full_generation` for generation-only stats.
 
 ### Evaluation Metrics
 

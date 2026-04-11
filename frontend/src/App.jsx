@@ -229,12 +229,14 @@ function MetricsTrendChart({ data, loading, darkMode }) {
 
 function App() {
   const [query, setQuery] = useState('What is the refund policy?');
+  const [streamMode, setStreamMode] = useState(true);
   const [scope, setScope] = useState('all');
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [topKRetrieval, setTopKRetrieval] = useState(6);
   const [topKRerank, setTopKRerank] = useState(2);
   const [response, setResponse] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [streamingInProgress, setStreamingInProgress] = useState(false);
   const [error, setError] = useState('');
   const [metrics, setMetrics] = useState({
     total_queries: 0,
@@ -340,6 +342,188 @@ function App() {
     }
   }
 
+  function commitQueryResult(data, trimmed) {
+    setApiStatus('online');
+    setResponse(data);
+    setHistory((current) => {
+      const next = [{
+        ...data,
+        query: trimmed,
+        normalizedQuery: normalizeQuery(trimmed),
+        scope,
+        top_k_retrieval: topKRetrieval,
+        top_k_rerank: topKRerank,
+      }, ...current.filter((item) => normalizeQuery(item.query) !== normalizeQuery(trimmed))];
+      return next.slice(0, HISTORY_LIMIT);
+    });
+    fetchMetrics();
+  }
+
+  async function requestNonStreamingQuery(trimmed) {
+    const res = await fetch(`${API_BASE}/query`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        query: trimmed,
+        top_k_retrieval: topKRetrieval,
+        top_k_rerank: topKRerank,
+      }),
+    });
+
+    if (!res.ok) {
+      const message = await parseErrorResponse(res, 'Query failed');
+      throw new Error(message);
+    }
+
+    return res.json();
+  }
+
+  async function handleStreamingQuery(trimmed) {
+    const streamResult = {
+      query: trimmed,
+      answer: '',
+      answer_grounded: false,
+      citations: [],
+      chunks_retrieved: 0,
+      latency_ms: 0,
+      model_used: 'mistral',
+      prompt_version: '1.1',
+      reranker_applied: true,
+      llm_called: true,
+      cached: false,
+      timestamp: new Date().toISOString(),
+    };
+
+    setStreamingInProgress(true);
+    setResponse(streamResult);
+
+    let typingQueue = '';
+    let typingTimer = null;
+
+    const stopTypingPump = () => {
+      if (typingTimer !== null) {
+        window.clearInterval(typingTimer);
+        typingTimer = null;
+      }
+    };
+
+    const startTypingPump = () => {
+      if (typingTimer !== null) return;
+      typingTimer = window.setInterval(() => {
+        if (!typingQueue) {
+          if (doneReceived) {
+            stopTypingPump();
+          }
+          return;
+        }
+
+        const batchSize = Math.max(2, Math.min(16, Math.ceil(typingQueue.length / 12)));
+        streamResult.answer += typingQueue.slice(0, batchSize);
+        typingQueue = typingQueue.slice(batchSize);
+        setResponse({ ...streamResult });
+
+        if (!typingQueue && doneReceived) {
+          stopTypingPump();
+        }
+      }, 16);
+    };
+
+    const res = await fetch(`${API_BASE}/query/stream`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        query: trimmed,
+        top_k_retrieval: topKRetrieval,
+        top_k_rerank: topKRerank,
+      }),
+    });
+
+    if (!res.ok) {
+      const message = await parseErrorResponse(res, 'Streaming query failed');
+      throw new Error(message);
+    }
+
+    if (!res.body) {
+      throw new Error('Streaming response has no body.');
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let doneReceived = false;
+
+    const processLine = (line) => {
+      const trimmedLine = line.trim();
+      if (!trimmedLine) return;
+
+      const parsed = JSON.parse(trimmedLine);
+      const event = parsed?.event;
+      const data = parsed?.data || {};
+
+      if (event === 'citations') {
+        streamResult.citations = Array.isArray(data.citations) ? data.citations : [];
+        streamResult.chunks_retrieved = Number(data.chunks_retrieved || 0);
+        streamResult.answer_grounded = Boolean(data.answer_grounded);
+        streamResult.reranker_applied = Boolean(data.reranker_applied ?? true);
+        streamResult.prompt_version = data.prompt_version || streamResult.prompt_version;
+        setResponse({ ...streamResult });
+        return;
+      }
+
+      if (event === 'token') {
+        typingQueue += String(data.token || '');
+        startTypingPump();
+        return;
+      }
+
+      if (event === 'done') {
+        doneReceived = true;
+        if (typeof data.answer === 'string' && !streamResult.answer && !typingQueue) {
+          typingQueue += data.answer;
+          startTypingPump();
+        }
+        if (typeof data.answer_grounded === 'boolean') {
+          streamResult.answer_grounded = data.answer_grounded;
+        }
+        streamResult.latency_ms = Number(data.latency_ms || 0);
+        streamResult.cached = Boolean(data.cached || false);
+        streamResult.model_used = data.model_used || streamResult.model_used;
+        streamResult.llm_called = Boolean(data.llm_called ?? streamResult.llm_called);
+        streamResult.timestamp = new Date().toISOString();
+        setResponse({ ...streamResult });
+      }
+    };
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      for (const line of lines) {
+        processLine(line);
+      }
+    }
+
+    buffer += decoder.decode();
+    if (buffer.trim()) {
+      processLine(buffer);
+    }
+
+    while (typingQueue) {
+      await new Promise((resolve) => window.setTimeout(resolve, 16));
+    }
+    stopTypingPump();
+
+    if (!doneReceived) {
+      stopTypingPump();
+      throw new Error('Streaming ended before completion event.');
+    }
+
+    commitQueryResult({ ...streamResult }, trimmed);
+  }
+
   async function handleSubmit(event) {
     event.preventDefault();
     const trimmed = query.trim();
@@ -350,40 +534,23 @@ function App() {
     setUploadMessage('');
 
     try {
-      const res = await fetch(`${API_BASE}/query`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          query: trimmed,
-          top_k_retrieval: topKRetrieval,
-          top_k_rerank: topKRerank,
-        }),
-      });
-
-      if (!res.ok) {
-        const message = await parseErrorResponse(res, 'Query failed');
-        throw new Error(message);
+      if (streamMode) {
+        try {
+          await handleStreamingQuery(trimmed);
+        } catch (streamErr) {
+          console.warn('Streaming failed, falling back to non-streaming query.', streamErr);
+          const fallbackData = await requestNonStreamingQuery(trimmed);
+          commitQueryResult(fallbackData, trimmed);
+        }
+      } else {
+        const data = await requestNonStreamingQuery(trimmed);
+        commitQueryResult(data, trimmed);
       }
-
-      const data = await res.json();
-      setApiStatus('online');
-      setResponse(data);
-      setHistory((current) => {
-        const next = [{
-          ...data,
-          query: trimmed,
-          normalizedQuery: normalizeQuery(trimmed),
-          scope,
-          top_k_retrieval: topKRetrieval,
-          top_k_rerank: topKRerank,
-        }, ...current.filter((item) => normalizeQuery(item.query) !== normalizeQuery(trimmed))];
-        return next.slice(0, HISTORY_LIMIT);
-      });
-      fetchMetrics();
     } catch (err) {
       setApiStatus('offline');
       setError(err.message || 'Something went wrong while querying the API.');
     } finally {
+      setStreamingInProgress(false);
       setLoading(false);
     }
   }
@@ -659,6 +826,15 @@ function App() {
                     {loading ? <ArrowPathIcon className="h-5 w-5 animate-spin" /> : <SparklesIcon className="h-5 w-5" />}
                     {loading ? 'Generating...' : 'Ask MindStack'}
                   </motion.button>
+                  <label className="inline-flex min-h-12 items-center gap-2 rounded-2xl bg-zinc-800/85 px-3 py-2 text-sm text-zinc-300">
+                    <input
+                      type="checkbox"
+                      checked={streamMode}
+                      onChange={(event) => setStreamMode(event.target.checked)}
+                      className="h-4 w-4 accent-teal-500"
+                    />
+                    Stream
+                  </label>
                   <div className="text-sm leading-6 text-zinc-500">Press Enter to submit. Use Shift+Enter for a new line.</div>
                 </div>
               </form>
@@ -718,7 +894,10 @@ function App() {
                   >
                   <div className="rounded-3xl bg-zinc-900/75 p-6 shadow-[0_8px_24px_rgba(0,0,0,0.22)]">
                     <p className="text-[11px] font-medium uppercase tracking-[0.22em] text-teal-300">Answer text</p>
-                    <p className="mt-4 max-w-4xl whitespace-pre-wrap text-[16px] leading-8 text-zinc-100">{response.answer}</p>
+                    <p className="mt-4 max-w-4xl whitespace-pre-wrap text-[16px] leading-8 text-zinc-100">
+                      {response.answer}
+                      {streamingInProgress && <span className="streaming-cursor" aria-hidden>|</span>}
+                    </p>
                   </div>
 
                   <div className="grid gap-3 sm:grid-cols-3">
