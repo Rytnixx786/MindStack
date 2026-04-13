@@ -73,6 +73,8 @@ def test_metrics_returns_expected_schema(tmp_path, monkeypatch):
         "p50_latency_ms",
         "queries_last_24h",
         "grounded_rate_7d",
+        "latency_breakdown",
+        "latency_note",
     }
     assert data["total_queries"] == 2
     assert data["grounded_rate"] == 0.5
@@ -81,6 +83,13 @@ def test_metrics_returns_expected_schema(tmp_path, monkeypatch):
     assert data["p50_latency_ms"] == 300.0
     assert isinstance(data["queries_last_24h"], int)
     assert isinstance(data["grounded_rate_7d"], float)
+    assert isinstance(data["latency_breakdown"], dict)
+    assert set(data["latency_breakdown"].keys()) == {
+        "cached",
+        "extractive_fast_path",
+        "full_generation",
+    }
+    assert isinstance(data["latency_note"], str)
 
 
 def test_ingest_triggers_reindex(monkeypatch):

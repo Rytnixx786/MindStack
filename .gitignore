@@ -41,3 +41,9 @@ frontend/dist/
 # OS files
 .DS_Store
 Thumbs.db
+.github/copilot-instructions.md
+.github/agents/code-reviewer.md
+.github/agents/security-auditor.md
+.github/agents/test-engineer.md
+.github/skills/code-review-and-quality/SKILL.md
+.github/skills/test-driven-development/SKILL.md
