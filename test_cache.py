@@ -4,11 +4,23 @@
 import requests
 import time
 import json
+import pytest
 
 API_BASE = 'http://localhost:8000'
 
+
+def _backend_available() -> bool:
+    """Return True if the local API is reachable, otherwise False."""
+    try:
+        resp = requests.get(f"{API_BASE}/health", timeout=3)
+        return resp.status_code == 200
+    except requests.RequestException:
+        return False
+
 def test_query_cache():
     """Test that repeat queries are served from cache with significant latency reduction."""
+    if not _backend_available():
+        pytest.skip("Skipping cache test: backend not reachable at http://localhost:8000")
     
     print("=" * 70)
     print("🧪 QUERY CACHING TEST")
